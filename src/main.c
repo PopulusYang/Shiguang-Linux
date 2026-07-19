@@ -114,11 +114,18 @@ static void display_current(AppState *state) {
     }
 
     /* 更新文字信息 */
-    if (e->meta && e->meta->title) {
-        const char *title = *e->meta->title ? e->meta->title : "（无标题）";
-        gtk_label_set_text(GTK_LABEL(state->overlay_title), title);
+    if (e->meta && e->meta->title && *e->meta->title) {
+        gtk_label_set_text(GTK_LABEL(state->overlay_title), e->meta->title);
     } else if (!e->ready) {
         gtk_label_set_text(GTK_LABEL(state->overlay_title), "加载中…");
+    } else {
+        gtk_label_set_text(GTK_LABEL(state->overlay_title), "（无标题）");
+    }
+
+    /* 收藏为空时显示提示 */
+    if (e->meta && e->meta->reldate && *e->meta->reldate &&
+        g_strcmp0(e->meta->reldate, "右键收藏图片后会出现在这里") == 0) {
+        gtk_label_set_text(GTK_LABEL(state->overlay_title), "收藏夹为空");
     }
 
     gchar *info = g_strdup_printf("%s  |  %s  |  %d/%u",
@@ -138,15 +145,59 @@ static gpointer load_one(gpointer user_data) {
     LoadTask *task = user_data;
     AppState *state = task->state;
 
-    /* 全部用 api_random，保证每张图不同 */
-    ImageData *meta = api_random(state->provider);
+    ImageData *meta = NULL;
+    GBytes    *img  = NULL;
+    gboolean   is_local = (g_strcmp0(state->provider, "favorites") == 0);
+
+    if (is_local) {
+        /* 收藏：从本地目录随机加载 */
+        int count = api_favorites_count();
+        if (count == 0) {
+            g_debug("收藏为空，无图片可加载");
+            meta = g_new0(ImageData, 1);
+            meta->title   = g_strdup("收藏夹为空");
+            meta->imgurl  = g_strdup("");
+            meta->reldate = g_strdup("右键收藏图片后会出现在这里");
+        } else {
+            int idx = g_random_int_range(0, count);
+            char *path = api_favorite_path_by_index(idx);
+            if (path) {
+                /* 从本地文件加载 */
+                GMappedFile *mf = g_mapped_file_new(path, FALSE, NULL);
+                if (mf) {
+                    img = g_bytes_new_with_free_func(
+                        g_mapped_file_get_contents(mf),
+                        g_mapped_file_get_length(mf),
+                        (GDestroyNotify)g_mapped_file_unref, mf);
+                }
+
+                /* 从文件名提取标题 */
+                char *basename = g_path_get_basename(path);
+                char *dot = strrchr(basename, '.');
+                if (dot) *dot = '\0';
+
+                meta = g_new0(ImageData, 1);
+                meta->title   = g_strdup(basename);
+                meta->imgurl  = path;  /* path 所有权转移 */
+                meta->reldate = g_strdup("本地收藏");
+                g_free(basename);
+            } else {
+                meta = g_new0(ImageData, 1);
+                meta->title  = g_strdup("加载失败");
+                meta->imgurl = g_strdup("");
+            }
+        }
+    } else {
+        /* 在线图源 */
+        meta = api_random(state->provider);
+        if (meta)
+            img = api_download_image(meta->imgurl);
+    }
 
     if (!meta) {
         g_idle_add(on_slot_loaded, task);
         return NULL;
     }
-
-    GBytes *img = api_download_image(meta->imgurl);
 
     ImageEntry *entry = entry_new();
     entry->meta  = meta;
@@ -328,10 +379,21 @@ static void on_left_click(GtkGestureClick *gesture, int n_press,
  *  右键菜单
  * ================================================================ */
 static void on_about_activate(GSimpleAction *action, GVariant *param, AppState *state) {
+    const char *authors[] = { "Populus", NULL };
+
     GtkWidget *about = gtk_about_dialog_new();
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(about), "拾光");
     gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(about), "0.1.0");
-    gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(about), "每日一图桌面客户端");
+    gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(about),
+        "每日一图桌面客户端\n\n"
+        "拾光版权归 南瓜多糖 所有\n"
+        "官网: https://gallery.timeline.ink/\n\n"
+        "本程序仅是对其 Windows UWP 版本的\n"
+        "拙劣模仿，请支持原作者。");
+    gtk_about_dialog_set_authors(GTK_ABOUT_DIALOG(about), authors);
+    gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(about),
+        "https://gallery.timeline.ink/");
+    gtk_about_dialog_set_license_type(GTK_ABOUT_DIALOG(about), GTK_LICENSE_MIT_X11);
     gtk_window_set_transient_for(GTK_WINDOW(about), GTK_WINDOW(state->window));
     gtk_window_present(GTK_WINDOW(about));
 }
@@ -400,6 +462,87 @@ static void on_save_response(GObject *source, GAsyncResult *result, gpointer use
     g_thread_new("save-worker", save_worker, task);
 }
 
+/* ================================================================
+ *  收藏 action
+ * ================================================================ */
+static gboolean on_fav_done(gpointer user_data) {
+    SaveTask *task = user_data;
+    int ok = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(task->parent), "fav-ok"));
+    gboolean already = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(task->parent), "fav-already"));
+
+    if (already) {
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("已收藏");
+        gtk_alert_dialog_set_detail(dlg, "该图片已在收藏夹中");
+        gtk_alert_dialog_show(dlg, task->parent);
+        g_object_unref(dlg);
+    } else if (ok) {
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("收藏成功");
+        gtk_alert_dialog_show(dlg, task->parent);
+        g_object_unref(dlg);
+    } else {
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("收藏失败");
+        gtk_alert_dialog_set_detail(dlg, "下载失败，请检查网络连接");
+        gtk_alert_dialog_show(dlg, task->parent);
+        g_object_unref(dlg);
+    }
+    save_task_free(task);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer fav_worker(gpointer user_data) {
+    SaveTask *task = user_data;
+    int ok = api_save_favorite(task->url, task->filepath ? task->filepath : "image");
+    g_object_set_data(G_OBJECT(task->parent), "fav-ok",
+                      GINT_TO_POINTER(ok));
+    g_idle_add(on_fav_done, task);
+    return NULL;
+}
+
+static void on_favorite_activate(GSimpleAction *action, GVariant *param, AppState *state) {
+    g_mutex_lock(&state->mutex);
+    if (!state->queue || state->queue->len == 0) {
+        g_mutex_unlock(&state->mutex);
+        return;
+    }
+    ImageEntry *e = g_ptr_array_index(state->queue, state->cursor);
+    if (!e->meta || !e->meta->title || !e->meta->imgurl || !*e->meta->imgurl) {
+        g_mutex_unlock(&state->mutex);
+        return;
+    }
+
+    /* 本地收藏无需重复下载 */
+    if (g_strcmp0(state->provider, "favorites") == 0) {
+        g_mutex_unlock(&state->mutex);
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("已在收藏夹");
+        gtk_alert_dialog_set_detail(dlg, "当前浏览的已是本地收藏图片");
+        gtk_alert_dialog_show(dlg, GTK_WINDOW(state->window));
+        g_object_unref(dlg);
+        return;
+    }
+
+    /* 检查重复 */
+    if (api_is_favorited(e->meta->title)) {
+        g_mutex_unlock(&state->mutex);
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("已收藏");
+        gtk_alert_dialog_set_detail(dlg, "该图片已在收藏夹中");
+        gtk_alert_dialog_show(dlg, GTK_WINDOW(state->window));
+        g_object_unref(dlg);
+        return;
+    }
+
+    SaveTask *task = g_new0(SaveTask, 1);
+    task->url      = g_strdup(e->meta->imgurl);
+    task->filepath = g_strdup(e->meta->title);
+    task->parent   = GTK_WINDOW(state->window);
+    g_mutex_unlock(&state->mutex);
+
+    g_object_set_data(G_OBJECT(task->parent), "fav-already",
+                      GINT_TO_POINTER(FALSE));
+    g_thread_new("fav-worker", fav_worker, task);
+}
+
 static void on_save_activate(GSimpleAction *action, GVariant *param, AppState *state) {
     /* 获取当前图片信息 */
     g_mutex_lock(&state->mutex);
@@ -450,18 +593,25 @@ static void on_save_activate(GSimpleAction *action, GVariant *param, AppState *s
     g_object_unref(dlg);
 }
 
+static gboolean on_window_close(GtkWindow *win, AppState *state) {
+    g_debug("窗口关闭，退出应用");
+    g_application_quit(g_application_get_default());
+    return TRUE; /* 阻止默认关闭行为，由 quit 统一处理 */
+}
+
 static void on_quit_activate(GSimpleAction *action, GVariant *param, AppState *state) {
-    gtk_window_destroy(GTK_WINDOW(state->window));
+    g_application_quit(g_application_get_default());
 }
 
 /* ---- 右键手势 ---- */
 static void on_right_click(GtkGestureClick *gesture, int n_press,
                            double x, double y, AppState *state) {
     GMenu *menu = g_menu_new();
-    g_menu_append(menu, "下载原图…", "app.save");
-    g_menu_append(menu, "设置…",     "app.settings");
-    g_menu_append(menu, "关于",      "app.about");
-    g_menu_append(menu, "退出",      "app.quit");
+    g_menu_append(menu, "收藏",       "app.favorite");
+    g_menu_append(menu, "下载原图…",  "app.save");
+    g_menu_append(menu, "设置…",      "app.settings");
+    g_menu_append(menu, "关于",       "app.about");
+    g_menu_append(menu, "退出",       "app.quit");
 
     GtkWidget *pop = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
     gtk_popover_set_pointing_to(GTK_POPOVER(pop), &(GdkRectangle){x, y, 1, 1});
@@ -584,6 +734,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     state->window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(state->window), "拾光");
     gtk_window_set_default_size(GTK_WINDOW(state->window), 1024, 768);
+    g_signal_connect(state->window, "close-request",
+                     G_CALLBACK(on_window_close), state);
 
     /* ---- 双图 Stack（crossfade 过渡）---- */
     state->picture_a = gtk_picture_new();
@@ -776,6 +928,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- App Actions ---- */
     GSimpleActionGroup *actions = g_simple_action_group_new();
     GSimpleAction *act;
+    act = g_simple_action_new("favorite", NULL);
+    g_signal_connect(act, "activate", G_CALLBACK(on_favorite_activate), state);
+    g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));
     act = g_simple_action_new("save", NULL);
     g_signal_connect(act, "activate", G_CALLBACK(on_save_activate), state);
     g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));

@@ -16,6 +16,7 @@ const char *PROVIDERS[] = {
     "bing",
     "nasa",
     "unsplash",
+    "favorites",
 };
 const int PROVIDER_COUNT = G_N_ELEMENTS(PROVIDERS);
 
@@ -319,6 +320,105 @@ int api_download_to_file(const char *url, const char *filepath) {
 
     g_debug("下载到文件完成: %s (%.2fs)", filepath, total_time);
     return TRUE;
+}
+
+/* ================================================================
+ *  收藏功能
+ * ================================================================ */
+#define FAVORITES_SUBDIR "Pictures/Shiguang"
+
+static char *favorites_dir(void) {
+    const char *home = g_get_home_dir();
+    char *dir = g_build_filename(home, FAVORITES_SUBDIR, NULL);
+    g_mkdir_with_parents(dir, 0755);
+    return dir;
+}
+
+/* 清理文件名中的非法字符 */
+static void sanitize_filename(char *name) {
+    for (char *p = name; *p; p++)
+        if (*p == '/' || *p == '\\' || *p == ':')
+            *p = '_';
+}
+
+int api_is_favorited(const char *title) {
+    if (!title || !*title) return FALSE;
+
+    char *dir = favorites_dir();
+    char  safe[256];
+    g_strlcpy(safe, title, sizeof(safe));
+    sanitize_filename(safe);
+
+    char *path = g_strdup_printf("%s/%s.jpg", dir, safe);
+    int exists = g_file_test(path, G_FILE_TEST_EXISTS);
+    g_free(path);
+    g_free(dir);
+    return exists;
+}
+
+int api_save_favorite(const char *url, const char *title) {
+    if (!url || !*url || !title || !*title) return FALSE;
+
+    char *dir = favorites_dir();
+    char  safe[256];
+    g_strlcpy(safe, title, sizeof(safe));
+    sanitize_filename(safe);
+
+    /* 重名处理：title.jpg, title(1).jpg, title(2).jpg … */
+    char *path = g_strdup_printf("%s/%s.jpg", dir, safe);
+    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        int n = 1;
+        do {
+            g_free(path);
+            path = g_strdup_printf("%s/%s(%d).jpg", dir, safe, n++);
+        } while (g_file_test(path, G_FILE_TEST_EXISTS));
+    }
+
+    g_debug("收藏: 下载 %s -> %s", url, path);
+    int ok = api_download_to_file(url, path);
+
+    g_free(path);
+    g_free(dir);
+    return ok;
+}
+
+int api_favorites_count(void) {
+    char *dir = favorites_dir();
+    GDir *d = g_dir_open(dir, 0, NULL);
+    if (!d) { g_free(dir); return 0; }
+
+    int count = 0;
+    while (g_dir_read_name(d)) count++;
+    g_dir_close(d);
+    g_free(dir);
+    return count;
+}
+
+char *api_favorite_path_by_index(int index) {
+    char *dir = favorites_dir();
+    GDir *d = g_dir_open(dir, 0, NULL);
+    if (!d) { g_free(dir); return NULL; }
+
+    /* 收集所有文件名并排序 */
+    GPtrArray *names = g_ptr_array_new();
+    const char *name;
+    while ((name = g_dir_read_name(d)) != NULL)
+        g_ptr_array_add(names, g_strdup(name));
+    g_dir_close(d);
+
+    /* 排序 */
+    g_ptr_array_sort(names, (GCompareFunc)g_strcmp0);
+
+    char *result = NULL;
+    if (index >= 0 && index < (int)names->len) {
+        result = g_build_filename(dir, names->pdata[index], NULL);
+    }
+
+    for (guint i = 0; i < names->len; i++)
+        g_free(names->pdata[i]);
+    g_ptr_array_free(names, TRUE);
+    g_free(dir);
+    return result;
 }
 
 /* ---- 释放 ---- */

@@ -53,6 +53,20 @@ GBytes *api_download_image(const char *url);
  */
 int api_download_to_file(const char *url, const char *filepath);
 
+/* ---- 收藏功能 ---- */
+
+/** 检查标题对应的图片是否已收藏 */
+int api_is_favorited(const char *title);
+
+/** 下载图片到收藏目录（自动处理重名：追加 (1)(2) 等） */
+int api_save_favorite(const char *url, const char *title);
+
+/** 收藏数量 */
+int api_favorites_count(void);
+
+/** 按索引获取收藏图片的完整路径（调用方 g_free） */
+char *api_favorite_path_by_index(int index);
+
 /**
  * 释放 ImageData
  */
