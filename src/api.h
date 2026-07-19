@@ -46,6 +46,14 @@ ImageData *api_random(const char *provider);
 GBytes *api_download_image(const char *url);
 
 /**
+ * 下载图片到文件
+ * @param url      图片 URL
+ * @param filepath 目标文件路径
+ * @return TRUE 成功
+ */
+int api_download_to_file(const char *url, const char *filepath);
+
+/**
  * 释放 ImageData
  */
 void api_image_free(ImageData *img);

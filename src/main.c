@@ -3,6 +3,7 @@
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #include <curl/curl.h>
+#include <string.h>
 #include "api.h"
 
 /* ================================================================
@@ -335,6 +336,120 @@ static void on_about_activate(GSimpleAction *action, GVariant *param, AppState *
     gtk_window_present(GTK_WINDOW(about));
 }
 
+/* ---- 下载任务（线程间传递）---- */
+typedef struct {
+    char   *url;
+    char   *filepath;
+    GtkWindow *parent;
+} SaveTask;
+
+static void save_task_free(SaveTask *t) {
+    if (!t) return;
+    g_free(t->url);
+    g_free(t->filepath);
+    g_free(t);
+}
+
+static gboolean on_save_done(gpointer user_data) {
+    SaveTask *task = user_data;
+    int ok = GPOINTER_TO_INT(
+        g_object_get_data(G_OBJECT(task->parent), "save-ok"));
+
+    if (ok) {
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("保存成功");
+        gtk_alert_dialog_set_detail(dlg, task->filepath);
+        gtk_alert_dialog_show(dlg, task->parent);
+        g_object_unref(dlg);
+    } else {
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("保存失败");
+        gtk_alert_dialog_set_detail(dlg, "下载失败，请检查网络连接");
+        gtk_alert_dialog_show(dlg, task->parent);
+        g_object_unref(dlg);
+    }
+    save_task_free(task);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer save_worker(gpointer user_data) {
+    SaveTask *task = user_data;
+    int ok = api_download_to_file(task->url, task->filepath);
+
+    g_object_set_data(G_OBJECT(task->parent), "save-ok",
+                      GINT_TO_POINTER(ok));
+    g_idle_add(on_save_done, task);
+    return NULL;
+}
+
+static void on_save_response(GObject *source, GAsyncResult *result, gpointer user_data) {
+    GtkFileDialog *dlg = GTK_FILE_DIALOG(source);
+    GError *error = NULL;
+    GFile *file = gtk_file_dialog_save_finish(dlg, result, &error);
+
+    if (!file) {
+        if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+            g_warning("保存对话框错误: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    SaveTask *task = user_data;
+    task->filepath = g_file_get_path(file);
+    g_object_unref(file);
+
+    g_debug("保存到: %s", task->filepath);
+    g_thread_new("save-worker", save_worker, task);
+}
+
+static void on_save_activate(GSimpleAction *action, GVariant *param, AppState *state) {
+    /* 获取当前图片信息 */
+    g_mutex_lock(&state->mutex);
+    if (!state->queue || state->queue->len == 0) {
+        g_mutex_unlock(&state->mutex);
+        return;
+    }
+    ImageEntry *e = g_ptr_array_index(state->queue, state->cursor);
+    if (!e->meta || !e->meta->imgurl || !*e->meta->imgurl) {
+        g_mutex_unlock(&state->mutex);
+        return;
+    }
+
+    SaveTask *task = g_new0(SaveTask, 1);
+    task->url    = g_strdup(e->meta->imgurl);
+    task->parent = GTK_WINDOW(state->window);
+
+    /* 用图片标题作为默认文件名，清理非法字符 */
+    const char *title = (e->meta->title && *e->meta->title)
+                      ? e->meta->title : "image";
+
+    /* 确定扩展名 */
+    const char *ext = strrchr(e->meta->imgurl, '.');
+    if (ext) {
+        const char *q = strchr(ext, '?');
+        size_t len = q ? (size_t)(q - ext) : strlen(ext);
+        char *name = g_strdup_printf("%s%.*s", title, (int)len, ext);
+        /* 清理文件名中的非法字符 */
+        for (char *p = name; *p; p++)
+            if (*p == '/' || *p == '\\' || *p == ':') *p = '_';
+        task->filepath = name;
+    } else {
+        task->filepath = g_strdup_printf("%s.jpg", title);
+        for (char *p = task->filepath; *p; p++)
+            if (*p == '/' || *p == '\\' || *p == ':') *p = '_';
+    }
+
+    g_mutex_unlock(&state->mutex);
+
+    GtkFileDialog *dlg = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dlg, "保存原图");
+    gtk_file_dialog_set_initial_name(dlg, task->filepath);
+    g_free(task->filepath);
+    task->filepath = NULL;
+
+    gtk_file_dialog_save(dlg, GTK_WINDOW(state->window), NULL,
+                         on_save_response, task);
+    g_object_unref(dlg);
+}
+
 static void on_quit_activate(GSimpleAction *action, GVariant *param, AppState *state) {
     gtk_window_destroy(GTK_WINDOW(state->window));
 }
@@ -343,9 +458,10 @@ static void on_quit_activate(GSimpleAction *action, GVariant *param, AppState *s
 static void on_right_click(GtkGestureClick *gesture, int n_press,
                            double x, double y, AppState *state) {
     GMenu *menu = g_menu_new();
-    g_menu_append(menu, "设置…",   "app.settings");
-    g_menu_append(menu, "关于",    "app.about");
-    g_menu_append(menu, "退出",    "app.quit");
+    g_menu_append(menu, "下载原图…", "app.save");
+    g_menu_append(menu, "设置…",     "app.settings");
+    g_menu_append(menu, "关于",      "app.about");
+    g_menu_append(menu, "退出",      "app.quit");
 
     GtkWidget *pop = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
     gtk_popover_set_pointing_to(GTK_POPOVER(pop), &(GdkRectangle){x, y, 1, 1});
@@ -660,6 +776,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- App Actions ---- */
     GSimpleActionGroup *actions = g_simple_action_group_new();
     GSimpleAction *act;
+    act = g_simple_action_new("save", NULL);
+    g_signal_connect(act, "activate", G_CALLBACK(on_save_activate), state);
+    g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));
     act = g_simple_action_new("settings", NULL);
     g_signal_connect(act, "activate", G_CALLBACK(on_settings_activate), state);
     g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));

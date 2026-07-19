@@ -259,6 +259,68 @@ GBytes *api_download_image(const char *url) {
     return g_byte_array_free_to_bytes(buf);
 }
 
+/* ---- 下载图片到文件 ---- */
+int api_download_to_file(const char *url, const char *filepath) {
+    if (!url || !*url || !filepath || !*filepath) {
+        g_debug("api_download_to_file: 参数无效");
+        return FALSE;
+    }
+
+    g_debug("下载到文件: %s -> %s", url, filepath);
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        g_warning("curl_easy_init() 失败");
+        return FALSE;
+    }
+
+    /* 打开目标文件 */
+    FILE *fp = fopen(filepath, "wb");
+    if (!fp) {
+        g_warning("无法创建文件: %s", filepath);
+        curl_easy_cleanup(curl);
+        return FALSE;
+    }
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers,
+        "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    long http_code = 0;
+    double total_time = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total_time);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    fclose(fp);
+
+    if (res != CURLE_OK) {
+        g_warning("下载到文件失败: %s", curl_easy_strerror(res));
+        remove(filepath);
+        return FALSE;
+    }
+
+    if (http_code != 200) {
+        g_warning("下载到文件 HTTP %ld", http_code);
+        remove(filepath);
+        return FALSE;
+    }
+
+    g_debug("下载到文件完成: %s (%.2fs)", filepath, total_time);
+    return TRUE;
+}
+
 /* ---- 释放 ---- */
 void api_image_free(ImageData *img) {
     if (!img) return;
