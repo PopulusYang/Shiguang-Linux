@@ -883,6 +883,7 @@ static void on_sidebar_close(GtkButton *btn, AppState *state) {
 }
 
 /* ---- 创建图源按钮 ---- */
+
 static GtkWidget *provider_button(const char *id, const char *label, AppState *state) {
     GtkWidget *btn = gtk_button_new_with_label(label);
     g_object_set_data_full(G_OBJECT(btn), "provider", g_strdup(id), g_free);
@@ -937,6 +938,34 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     AppState *state = g_new0(AppState, 1);
     state->provider = g_strdup(PROVIDERS[0]);
     g_mutex_init(&state->mutex);
+
+    /* 跟随系统明暗模式（多桌面兼容）*/
+    {
+        gboolean prefer_dark = FALSE;
+        GSettingsSchemaSource *src = g_settings_schema_source_get_default();
+
+        /* 1. 先试 freedesktop 门户 */
+        if (g_settings_schema_source_lookup(src, "org.freedesktop.appearance", TRUE)) {
+            GSettings *s = g_settings_new("org.freedesktop.appearance");
+            prefer_dark = (g_settings_get_uint(s, "color-scheme") == 1);
+            g_object_unref(s);
+        }
+        /* 2. 再试 GNOME */
+        else if (g_settings_schema_source_lookup(src, "org.gnome.desktop.interface", TRUE)) {
+            GSettings *s = g_settings_new("org.gnome.desktop.interface");
+            gchar *v = g_settings_get_string(s, "color-scheme");
+            prefer_dark = (g_strcmp0(v, "prefer-dark") == 0);
+            g_free(v);
+            g_object_unref(s);
+        }
+        /* 3. 都不行默认为浅色 */
+
+        GtkSettings *sys = gtk_settings_get_for_display(
+            gdk_display_get_default());
+        g_object_set(sys, "gtk-application-prefer-dark-theme",
+                     prefer_dark, NULL);
+        g_debug("系统主题: %s", prefer_dark ? "深色" : "浅色");
+    }
 
     /* ---- 窗口 ---- */
     state->window = gtk_application_window_new(app);
@@ -1067,6 +1096,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), btnlist);
 
     /* 一言 */
+
     state->label_hitokoto = gtk_label_new("加载中…");
     gtk_widget_set_margin_start(state->label_hitokoto, 12);
     gtk_widget_set_margin_end(state->label_hitokoto, 12);
@@ -1104,6 +1134,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- CSS ---- */
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css,
+        /* 图片上的文字：始终白色+阴影，不跟主题 */
         ".overlay-slogan {"
         "  font-size: 15px;"
         "  color: rgba(255,255,255,0.5);"
@@ -1120,39 +1151,36 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         "  color: rgba(255,255,255,0.85);"
         "  text-shadow: 0 1px 3px rgba(0,0,0,0.7);"
         "}"
+        /* 侧边栏：使用 GTK 主题颜色，自动适配明暗 */
         ".sidebar {"
-        "  background-color: rgba(255,255,255,0.85);"
-        "  border-right: 1px solid rgba(0,0,0,0.1);"
+        "  background-color: alpha(@theme_bg_color, 0.92);"
+        "  border-right: 1px solid @borders;"
         "}"
         ".sidebar-title {"
         "  font-size: 20px; font-weight: bold;"
-        "  color: black;"
+        "  color: @theme_fg_color;"
         "}"
         ".sidebar-hitokoto {"
         "  font-size: 13px;"
-        "  color: rgba(0,0,0,0.7);"
+        "  color: alpha(@theme_fg_color, 0.7);"
         "  font-style: italic;"
         "  padding: 8px 0;"
-        "  border-top: 1px solid rgba(0,0,0,0.1);"
-        "  border-bottom: 1px solid rgba(0,0,0,0.1);"
+        "  border-top: 1px solid @borders;"
+        "  border-bottom: 1px solid @borders;"
         "}"
         ".sidebar-label {"
         "  font-size: 12px; font-weight: bold;"
-        "  color: rgba(0,0,0,0.55);"
+        "  color: alpha(@theme_fg_color, 0.55);"
         "  text-transform: uppercase; letter-spacing: 1px;"
         "}"
         ".sidebar checkbutton {"
-        "  color: black;"
-        "}"
-        ".sidebar checkbutton check {"
-        "  background-color: rgba(0,0,0,0.08);"
-        "  border-color: rgba(0,0,0,0.3);"
+        "  color: @theme_fg_color;"
         "}"
         ".sidebar dropdown > button {"
-        "  color: black;"
+        "  color: @theme_fg_color;"
         "}"
         ".sidebar button {"
-        "  color: black;"
+        "  color: @theme_fg_color;"
         "}");
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(),
