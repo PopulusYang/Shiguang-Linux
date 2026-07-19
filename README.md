@@ -71,4 +71,3 @@ makepkg -si
 ## 鸣谢
 
 - [南瓜多糖](https://gallery.timeline.ink/) — 拾光原作者，提供图片与 API 服务
-- [glitter](https://glitter.timeline.ink/) — 一言 API
