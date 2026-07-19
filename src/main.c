@@ -668,7 +668,7 @@ static void on_favorite_activate(GSimpleAction *action, GVariant *param, AppStat
     }
 
     /* 检查重复 */
-    if (api_is_favorited(e->meta->title)) {
+    if (api_is_favorited(e->meta->title, e->meta->imgurl)) {
         g_mutex_unlock(&state->mutex);
         GtkAlertDialog *dlg = gtk_alert_dialog_new("已收藏");
         gtk_alert_dialog_set_detail(dlg, "该图片已在收藏夹中");

@@ -55,8 +55,8 @@ int api_download_to_file(const char *url, const char *filepath);
 
 /* ---- 收藏功能 ---- */
 
-/** 检查标题对应的图片是否已收藏 */
-int api_is_favorited(const char *title);
+/** 检查图片是否已收藏（标题为空时从 URL 提取文件名）*/
+int api_is_favorited(const char *title, const char *url);
 
 /** 下载图片到收藏目录（自动处理重名：追加 (1)(2) 等） */
 int api_save_favorite(const char *url, const char *title);

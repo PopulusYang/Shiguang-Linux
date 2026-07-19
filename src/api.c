@@ -372,8 +372,12 @@ static void sanitize_filename(char *name) {
             *p = '_';
 }
 
-int api_is_favorited(const char *title) {
-    if (!title || !*title) return FALSE;
+int api_is_favorited(const char *title, const char *url) {
+    if (!title || !*title) {
+        if (!url || !*url) return FALSE;
+        const char *slash = strrchr(url, '/');
+        title = slash ? slash + 1 : "untitled";
+    }
 
     char *dir = favorites_dir();
     char  safe[256];
@@ -388,7 +392,13 @@ int api_is_favorited(const char *title) {
 }
 
 int api_save_favorite(const char *url, const char *title) {
-    if (!url || !*url || !title || !*title) return FALSE;
+    if (!url || !*url) return FALSE;
+
+    /* 标题为空时从 URL 提取文件名 */
+    if (!title || !*title) {
+        const char *slash = strrchr(url, '/');
+        title = slash ? slash + 1 : "untitled";
+    }
 
     char *dir = favorites_dir();
     char  safe[256];
