@@ -1,4 +1,4 @@
-# Maintainer: Populus Yang <populus@example.com>
+# Maintainer: Populus
 pkgname=shiguang
 pkgver=0.1.0
 pkgrel=1

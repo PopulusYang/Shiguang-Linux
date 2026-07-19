@@ -940,7 +940,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     /* ---- 窗口 ---- */
     state->window = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(state->window), "拾光");
+    gtk_window_set_title(GTK_WINDOW(state->window), "拾光（第三方）");
     gtk_window_set_default_size(GTK_WINDOW(state->window), 1024, 768);
     g_signal_connect(state->window, "close-request",
                      G_CALLBACK(on_window_close), state);
@@ -1030,7 +1030,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_margin_end(btnlist, 8);
 
     /* 官方标签 */
-    GtkWidget *lbl_official = gtk_label_new("官方维护");
+    GtkWidget *lbl_official = gtk_label_new("拾光官方");
     gtk_widget_set_halign(lbl_official, GTK_ALIGN_START);
     gtk_widget_set_margin_start(lbl_official, 4);
     gtk_widget_set_margin_top(lbl_official, 4);

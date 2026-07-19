@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=拾光
-Comment=每日一图桌面客户端
+Name=拾光（第三方）
+Comment=每日一图桌面客户端（非官方 Linux 移植）
 Exec=shiguang
 Icon=io.github.populusyang.shiguang
 Terminal=false
