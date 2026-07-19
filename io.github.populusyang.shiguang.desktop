@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=拾光
+Comment=每日一图桌面客户端
+Exec=shiguang
+Icon=io.github.populusyang.shiguang
+Terminal=false
+Type=Application
+Categories=Graphics;Photography;

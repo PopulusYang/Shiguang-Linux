@@ -8,15 +8,46 @@
 
 #define BASE_URL "https://api.nguaduot.cn"
 
-/* 可用图源列表 */
+/* 可用图源列表（官方 + 收藏 + 三方）*/
 const char *PROVIDERS[] = {
-    "timeline",
-    "glutton",
-    "snake",
-    "bing",
-    "nasa",
-    "unsplash",
-    "favorites",
+    /* 官方维护 / 精选 */
+    "timeline",    /* 拾光 */
+    "glutton",     /* 周度精选 */
+    "snake",       /* 故纸堆 */
+    "spotlight",   /* Windows 聚焦 */
+    /* 我的收藏 */
+    "favorites",   /* 本地收藏 */
+    /* 三方图源 */
+    "bing",        /* 必应 */
+    "nasa",        /* NASA */
+    "one",         /* ONE · 一个 */
+    "wallhaven",   /* wallhaven */
+    "unsplash",    /* Unsplash */
+    "ymyouli",     /* 一梦幽黎 */
+    "netbian",     /* 彼岸图网 */
+    "dpm",         /* 故宫博物院 */
+    "nasaimages",  /* NASA Images */
+    "qingbz",      /* 轻壁纸 */
+    "zzzmh",       /* 极简壁纸 */
+    "toopic",      /* 壁纸社 */
+    "bizhihui",    /* 壁纸汇 */
+    "wallhere",    /* WallHere */
+    "huamao",      /* 花猫壁纸 */
+    "3g",          /* 3G 壁纸 */
+    "wallpaperup", /* WallpaperUP */
+    "colorhub",    /* colorhub */
+    "pexels",      /* Pexels */
+    "bizhi1",      /* 极简壁纸 */
+    "simple",      /* Simple Desktops */
+    "weilan",      /* 蔚蓝主页 */
+    "abyss",       /* Wallpaper Abyss */
+    "pixiv",       /* pixiv */
+    "pixabay",     /* Pixabay */
+    "backiee",     /* backiee */
+    "eso",         /* ESO */
+    "skitter",     /* Skitterphoto */
+    "obzhi",       /* 乌云壁纸 */
+    "adwest",      /* 公元桌面 */
 };
 const int PROVIDER_COUNT = G_N_ELEMENTS(PROVIDERS);
 

@@ -3,6 +3,7 @@
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #include <curl/curl.h>
+#include <json-glib/json-glib.h>
 #include <string.h>
 #include "api.h"
 
@@ -33,8 +34,6 @@ static void entry_free(ImageEntry *e) {
  *  前向声明
  * ================================================================ */
 typedef struct AppState AppState;
-typedef enum   { ORDER_SEQUENTIAL, ORDER_RANDOM } ImageOrder;
-
 /* ================================================================ */
 typedef struct {
     AppState *state;
@@ -48,11 +47,11 @@ struct AppState {
     GtkWidget   *picture_a;
     GtkWidget   *picture_b;
     gboolean     active_is_b;      /* 当前显示的是 picture_b */
+    GtkWidget   *overlay_slogan;
     GtkWidget   *overlay_title;
     GtkWidget   *overlay_info;
     GtkWidget   *spinner;
     char        *provider;
-    ImageOrder   order;            /* 加载顺序 */
 
     /* 队列 */
     GPtrArray   *queue;
@@ -65,8 +64,7 @@ struct AppState {
 
     /* 侧边栏控件 */
     GtkWidget   *sidebar_revealer;
-    GtkWidget   *sidebar_dropdown;
-    GtkWidget   *sidebar_radio_rand;
+    GtkWidget   *label_hitokoto;
 };
 
 /* ---- 前向声明 ---- */
@@ -330,6 +328,24 @@ static void trigger_preload(AppState *state) {
 /* ================================================================
  *  键盘 ← → 导航
  * ================================================================ */
+/* ---- 图源显示名 ---- */
+static const char *PROVIDER_NAMES[] = {
+    /* 官方 */
+    "拾光", "周度精选", "故纸堆", "Windows 聚焦",
+    /* 收藏 */
+    "我的收藏",
+    /* 三方 */
+    "必应", "NASA", "ONE · 一个", "wallhaven",
+    "Unsplash", "一梦幽黎", "彼岸图网", "故宫博物院",
+    "NASA Images", "轻壁纸", "极简壁纸", "壁纸社",
+    "壁纸汇", "WallHere", "花猫壁纸", "3G 壁纸",
+    "WallpaperUP", "colorhub", "Pexels", "极简壁纸2",
+    "Simple Desktops", "蔚蓝主页", "Wallpaper Abyss",
+    "pixiv", "Pixabay", "backiee", "ESO",
+    "Skitterphoto", "乌云壁纸", "公元桌面",
+};
+#define OFFICIAL_COUNT 4   /* timeline, glutton, snake, spotlight */
+
 static gboolean on_key_pressed(GtkEventControllerKey *controller,
                                guint keyval, guint keycode,
                                GdkModifierType state, AppState *app) {
@@ -379,20 +395,23 @@ static void on_left_click(GtkGestureClick *gesture, int n_press,
  *  右键菜单
  * ================================================================ */
 static void on_about_activate(GSimpleAction *action, GVariant *param, AppState *state) {
-    const char *authors[] = { "Populus", NULL };
+    const char *authors[] = {
+        "南瓜多糖 — 拾光原作者，提供图片与 API",
+        "Populus  — Linux 桌面客户端移植",
+        NULL
+    };
 
     GtkWidget *about = gtk_about_dialog_new();
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(about), "拾光");
     gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(about), "0.1.0");
     gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(about),
-        "每日一图桌面客户端\n\n"
-        "拾光版权归 南瓜多糖 所有\n"
-        "官网: https://gallery.timeline.ink/\n\n"
-        "本程序仅是对其 Windows UWP 版本的\n"
-        "拙劣模仿，请支持原作者。");
+        "Linux 第三方桌面客户端\n"
+        "非官方版本，仅是对原 Windows UWP 版的移植");
     gtk_about_dialog_set_authors(GTK_ABOUT_DIALOG(about), authors);
     gtk_about_dialog_set_website(GTK_ABOUT_DIALOG(about),
         "https://gallery.timeline.ink/");
+    gtk_about_dialog_set_website_label(GTK_ABOUT_DIALOG(about),
+        "拾光官方网站");
     gtk_about_dialog_set_license_type(GTK_ABOUT_DIALOG(about), GTK_LICENSE_MIT_X11);
     gtk_window_set_transient_for(GTK_WINDOW(about), GTK_WINDOW(state->window));
     gtk_window_present(GTK_WINDOW(about));
@@ -498,6 +517,132 @@ static gpointer fav_worker(gpointer user_data) {
                       GINT_TO_POINTER(ok));
     g_idle_add(on_fav_done, task);
     return NULL;
+}
+
+/* ================================================================
+ *  设为壁纸
+ * ================================================================ */
+#define WALLPAPER_DIR  ".cache/shiguang"
+#define WALLPAPER_FILE "wallpaper"
+
+static char *save_current_to_cache(AppState *state) {
+    g_mutex_lock(&state->mutex);
+    ImageEntry *e = g_ptr_array_index(state->queue, state->cursor);
+    if (!e->image) {
+        g_mutex_unlock(&state->mutex);
+        return NULL;
+    }
+    GBytes *bytes = g_bytes_ref(e->image);  /* 持有引用，跨锁安全 */
+    g_mutex_unlock(&state->mutex);
+
+    const char *home = g_get_home_dir();
+    char *dir = g_build_filename(home, WALLPAPER_DIR, NULL);
+    g_mkdir_with_parents(dir, 0755);
+
+    char *path = g_build_filename(dir, WALLPAPER_FILE, NULL);
+    g_free(dir);
+
+    gsize size;
+    const guint8 *data = g_bytes_get_data(bytes, &size);
+
+    GError *error = NULL;
+    gboolean ok = g_file_set_contents(path, (const char *)data, size, &error);
+    g_bytes_unref(bytes);
+
+    if (!ok) {
+        g_warning("写入壁纸缓存失败: %s", error->message);
+        g_clear_error(&error);
+        g_free(path);
+        return NULL;
+    }
+
+    g_debug("壁纸缓存: %s (%lu 字节)", path, (unsigned long)size);
+    return path;
+}
+
+static gboolean set_wallpaper(const char *filepath, GtkWindow *parent) {
+    const char *desktop = g_getenv("XDG_CURRENT_DESKTOP");
+    g_debug("当前桌面: %s", desktop ? desktop : "(未知)");
+
+    /* GNOME */
+    if (desktop && strstr(desktop, "GNOME")) {
+        char *uri = g_strdup_printf("file://%s", filepath);
+
+        /* 明亮模式 */
+        GSettings *s = g_settings_new("org.gnome.desktop.background");
+        g_settings_set_string(s, "picture-uri", uri);
+
+        /* 暗色模式（可能不存在，忽略错误）*/
+        g_settings_set_string(s, "picture-uri-dark", uri);
+
+        g_settings_sync();
+        g_object_unref(s);
+        g_free(uri);
+
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("壁纸已更新");
+        gtk_alert_dialog_show(dlg, parent);
+        g_object_unref(dlg);
+        return TRUE;
+    }
+
+    /* KDE Plasma */
+    if (desktop && strstr(desktop, "KDE")) {
+        char *uri = g_strdup_printf("file://%s", filepath);
+        char *cmd  = g_strdup_printf("plasma-apply-wallpaperimage \"%s\"", uri);
+
+        int ret = system(cmd);
+        g_free(cmd);
+        g_free(uri);
+
+        GtkAlertDialog *dlg = gtk_alert_dialog_new(ret == 0 ? "壁纸已更新" : "设置失败");
+        if (ret != 0)
+            gtk_alert_dialog_set_detail(dlg, "请确认 plasma-apply-wallpaperimage 可用");
+        gtk_alert_dialog_show(dlg, parent);
+        g_object_unref(dlg);
+        return ret == 0;
+    }
+
+    /* XFCE */
+    if (desktop && strstr(desktop, "XFCE")) {
+        char *cmd = g_strdup_printf(
+            "xfconf-query -c xfce4-desktop "
+            "-p /backdrop/screen0/monitor0/workspace0/last-image "
+            "-s \"%s\"", filepath);
+        int ret = system(cmd);
+        g_free(cmd);
+
+        GtkAlertDialog *dlg = gtk_alert_dialog_new(ret == 0 ? "壁纸已更新" : "设置失败");
+        if (ret != 0)
+            gtk_alert_dialog_set_detail(dlg, "请确认 xfconf-query 可用");
+        gtk_alert_dialog_show(dlg, parent);
+        g_object_unref(dlg);
+        return ret == 0;
+    }
+
+    /* 未知桌面 */
+    char *msg = g_strdup_printf(
+        "当前桌面 (%s) 尚不支持自动设置\n"
+        "壁纸已保存到:\n%s\n请手动设置",
+        desktop ? desktop : "未知", filepath);
+    GtkAlertDialog *dlg = gtk_alert_dialog_new("提示");
+    gtk_alert_dialog_set_detail(dlg, msg);
+    gtk_alert_dialog_show(dlg, parent);
+    g_object_unref(dlg);
+    g_free(msg);
+    return FALSE;
+}
+
+static void on_wallpaper_activate(GSimpleAction *action, GVariant *param, AppState *state) {
+    char *path = save_current_to_cache(state);
+    if (!path) {
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("无法设置壁纸");
+        gtk_alert_dialog_set_detail(dlg, "当前图片尚未加载完成");
+        gtk_alert_dialog_show(dlg, GTK_WINDOW(state->window));
+        g_object_unref(dlg);
+        return;
+    }
+    set_wallpaper(path, GTK_WINDOW(state->window));
+    g_free(path);
 }
 
 static void on_favorite_activate(GSimpleAction *action, GVariant *param, AppState *state) {
@@ -607,6 +752,7 @@ static void on_quit_activate(GSimpleAction *action, GVariant *param, AppState *s
 static void on_right_click(GtkGestureClick *gesture, int n_press,
                            double x, double y, AppState *state) {
     GMenu *menu = g_menu_new();
+    g_menu_append(menu, "设为壁纸",    "app.wallpaper");
     g_menu_append(menu, "收藏",       "app.favorite");
     g_menu_append(menu, "下载原图…",  "app.save");
     g_menu_append(menu, "设置…",      "app.settings");
@@ -625,21 +771,12 @@ static void on_right_click(GtkGestureClick *gesture, int n_press,
  *  设置对话框
  * ================================================================ */
 /* ---- 侧边栏：应用设置并重新加载 ---- */
-static void on_sidebar_apply(GtkButton *btn, AppState *state) {
-    guint idx = gtk_drop_down_get_selected(
-        GTK_DROP_DOWN(state->sidebar_dropdown));
-    if (idx < (guint)PROVIDER_COUNT) {
-        g_free(state->provider);
-        state->provider = g_strdup(PROVIDERS[idx]);
-    }
-    state->order = gtk_check_button_get_active(
-        GTK_CHECK_BUTTON(state->sidebar_radio_rand))
-        ? ORDER_RANDOM : ORDER_SEQUENTIAL;
+/* ---- 公共：切换到指定图源 ---- */
+static void switch_provider(AppState *state, const char *provider) {
+    g_free(state->provider);
+    state->provider = g_strdup(provider);
+    g_debug("切换图源: %s", provider);
 
-    g_debug("设置: provider=%s, order=%s", state->provider,
-            state->order == ORDER_RANDOM ? "random" : "sequential");
-
-    /* 清空队列重新加载 */
     g_mutex_lock(&state->mutex);
     if (state->queue) g_ptr_array_free(state->queue, TRUE);
     state->queue = g_ptr_array_new_full(WINDOW_SIZE, (GDestroyNotify)entry_free);
@@ -654,6 +791,8 @@ static void on_sidebar_apply(GtkButton *btn, AppState *state) {
 
     gtk_widget_set_visible(state->spinner, TRUE);
     gtk_spinner_start(GTK_SPINNER(state->spinner));
+    gtk_picture_set_paintable(GTK_PICTURE(state->picture_a), NULL);
+    gtk_picture_set_paintable(GTK_PICTURE(state->picture_b), NULL);
 
     state->fwd_busy = TRUE;
     LoadTask *fwd = g_new0(LoadTask, 1);
@@ -664,31 +803,101 @@ static void on_sidebar_apply(GtkButton *btn, AppState *state) {
     LoadTask *bwd = g_new0(LoadTask, 1);
     bwd->state = state; bwd->slot = WINDOW_HALF - 1; bwd->side = -1;
     g_thread_new("bwd", load_one, bwd);
+}
 
-    /* 收回侧边栏 */
+/* ---- 点击图源按钮 ---- */
+static void on_provider_btn(GtkButton *btn, AppState *state) {
+    const char *provider = g_object_get_data(G_OBJECT(btn), "provider");
+    switch_provider(state, provider);
     gtk_revealer_set_reveal_child(
         GTK_REVEALER(state->sidebar_revealer), FALSE);
+}
 
+/* ---- 一言 ---- */
+static size_t hitokoto_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    g_string_append_len((GString *)userdata, ptr, size * nmemb);
+    return size * nmemb;
+}
+
+static char *api_fetch_hitokoto(void) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+
+    GString *buf = g_string_new(NULL);
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://glitter.timeline.ink/api/v1?json=1");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, hitokoto_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, buf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        g_string_free(buf, TRUE);
+        return NULL;
+    }
+
+    JsonParser *parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, buf->str, buf->len, NULL)) {
+        g_string_free(buf, TRUE);
+        g_object_unref(parser);
+        return NULL;
+    }
+    g_string_free(buf, TRUE);
+
+    JsonReader *r = json_reader_new(json_parser_get_root(parser));
+    char *content = NULL;
+    if (json_reader_read_member(r, "data") &&
+        json_reader_read_element(r, 0) &&
+        json_reader_read_member(r, "sentence")) {
+        content = g_strdup(json_reader_get_string_value(r) ?: "");
+    }
+    g_object_unref(r);
+    g_object_unref(parser);
+    return content;
+}
+
+typedef struct { AppState *state; char *text; } HitokotoTask;
+
+static gboolean on_hitokoto_loaded(gpointer data) {
+    HitokotoTask *t = data;
+    if (t->text)
+        gtk_label_set_text(GTK_LABEL(t->state->label_hitokoto), t->text);
+    g_free(t->text);
+    g_free(t);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer hitokoto_thread(gpointer data) {
+    HitokotoTask *t = data;
+    t->text = api_fetch_hitokoto();
+    g_idle_add(on_hitokoto_loaded, t);
+    return NULL;
 }
 
 /* ---- 侧边栏：关闭 ---- */
 static void on_sidebar_close(GtkButton *btn, AppState *state) {
     gtk_revealer_set_reveal_child(
         GTK_REVEALER(state->sidebar_revealer), FALSE);
+}
 
+/* ---- 创建图源按钮 ---- */
+static GtkWidget *provider_button(const char *id, const char *label, AppState *state) {
+    GtkWidget *btn = gtk_button_new_with_label(label);
+    g_object_set_data_full(G_OBJECT(btn), "provider", g_strdup(id), g_free);
+    g_signal_connect(btn, "clicked", G_CALLBACK(on_provider_btn), state);
+    return btn;
 }
 
 /* ---- 右键菜单：弹出侧边栏 ---- */
 static void on_settings_activate(GSimpleAction *action, GVariant *param,
                                   AppState *state) {
-    /* 同步当前状态到侧边栏控件 */
-    for (int i = 0; i < PROVIDER_COUNT; i++) {
-        if (g_strcmp0(state->provider, PROVIDERS[i]) == 0) {
-            gtk_drop_down_set_selected(
-                GTK_DROP_DOWN(state->sidebar_dropdown), i);
-            break;
-        }
-    }
+    /* 触发一言加载 */
+    HitokotoTask *t = g_new0(HitokotoTask, 1);
+    t->state = state;
+    g_thread_new("hitokoto", hitokoto_thread, t);
+
     gtk_revealer_set_reveal_child(
         GTK_REVEALER(state->sidebar_revealer), TRUE);
 }
@@ -727,7 +936,6 @@ static void init_queue(AppState *state) {
 static void on_activate(GtkApplication *app, gpointer user_data) {
     AppState *state = g_new0(AppState, 1);
     state->provider = g_strdup(PROVIDERS[0]);
-    state->order    = ORDER_SEQUENTIAL;
     g_mutex_init(&state->mutex);
 
     /* ---- 窗口 ---- */
@@ -736,6 +944,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_window_set_default_size(GTK_WINDOW(state->window), 1024, 768);
     g_signal_connect(state->window, "close-request",
                      G_CALLBACK(on_window_close), state);
+
 
     /* ---- 双图 Stack（crossfade 过渡）---- */
     state->picture_a = gtk_picture_new();
@@ -754,6 +963,13 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     state->active_is_b = FALSE;
     gtk_widget_set_hexpand(state->stack, TRUE);
     gtk_widget_set_vexpand(state->stack, TRUE);
+
+    /* ---- Slogan（顶部居中）---- */
+    state->overlay_slogan = gtk_label_new("时光如歌，岁月如诗");
+    gtk_widget_set_halign(state->overlay_slogan, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(state->overlay_slogan, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(state->overlay_slogan, 48);
+    gtk_widget_add_css_class(state->overlay_slogan, "overlay-slogan");
 
     /* ---- 文字 overlay ---- */
     state->overlay_title = gtk_label_new(NULL);
@@ -784,65 +1000,92 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* 图片区 Overlay: 底=图片, 上=文字+spinner */
     GtkWidget *pic_overlay = gtk_overlay_new();
     gtk_overlay_set_child(GTK_OVERLAY(pic_overlay), state->stack);
+    gtk_overlay_add_overlay(GTK_OVERLAY(pic_overlay), state->overlay_slogan);
     gtk_overlay_add_overlay(GTK_OVERLAY(pic_overlay), info_box);
     gtk_overlay_add_overlay(GTK_OVERLAY(pic_overlay), state->spinner);
 
     /* ---- 左侧侧边栏 ---- */
-    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_size_request(sidebar, 260, -1);
+    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_size_request(sidebar, 240, -1);
     gtk_widget_set_valign(sidebar, GTK_ALIGN_FILL);
-    gtk_widget_set_margin_start(sidebar, 16);
-    gtk_widget_set_margin_end(sidebar, 16);
-    gtk_widget_set_margin_top(sidebar, 24);
-    gtk_widget_set_margin_bottom(sidebar, 24);
+    gtk_widget_set_margin_top(sidebar, 12);
+    gtk_widget_set_margin_bottom(sidebar, 12);
     gtk_widget_add_css_class(sidebar, "sidebar");
 
-    GtkWidget *s_title = gtk_label_new("设置");
+    /* 标题 */
+    GtkWidget *s_title = gtk_label_new("图源");
     gtk_widget_set_halign(s_title, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(s_title, 12);
+    gtk_widget_set_margin_end(s_title, 12);
     gtk_widget_add_css_class(s_title, "sidebar-title");
 
-    GtkWidget *s_lbl1 = gtk_label_new("图源");
-    gtk_widget_set_halign(s_lbl1, GTK_ALIGN_START);
-    gtk_widget_set_margin_top(s_lbl1, 8);
-    gtk_widget_add_css_class(s_lbl1, "sidebar-label");
+    /* 可滚动区域 */
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 
-    GtkStringList *providers = gtk_string_list_new((const char * const *)PROVIDERS);
-    state->sidebar_dropdown = gtk_drop_down_new(G_LIST_MODEL(providers), NULL);
+    GtkWidget *btnlist = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_start(btnlist, 8);
+    gtk_widget_set_margin_end(btnlist, 8);
 
-    GtkWidget *s_lbl2 = gtk_label_new("排序方式");
-    gtk_widget_set_halign(s_lbl2, GTK_ALIGN_START);
-    gtk_widget_set_margin_top(s_lbl2, 8);
-    gtk_widget_add_css_class(s_lbl2, "sidebar-label");
+    /* 官方标签 */
+    GtkWidget *lbl_official = gtk_label_new("官方维护");
+    gtk_widget_set_halign(lbl_official, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(lbl_official, 4);
+    gtk_widget_set_margin_top(lbl_official, 4);
+    gtk_widget_add_css_class(lbl_official, "sidebar-label");
+    gtk_box_append(GTK_BOX(btnlist), lbl_official);
 
-    GtkWidget *radio_seq  = gtk_check_button_new_with_label("顺序排列");
-    GtkWidget *radio_rand = gtk_check_button_new_with_label("随机排列");
-    state->sidebar_radio_rand = radio_rand;
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(radio_seq), TRUE);
-    gtk_check_button_set_group(GTK_CHECK_BUTTON(radio_rand),
-                                GTK_CHECK_BUTTON(radio_seq));
+    /* 官方按钮 */
+    for (int i = 0; i < OFFICIAL_COUNT; i++)
+        gtk_box_append(GTK_BOX(btnlist),
+            provider_button(PROVIDERS[i], PROVIDER_NAMES[i], state));
 
-    GtkWidget *s_btnbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_halign(s_btnbox, GTK_ALIGN_END);
-    gtk_widget_set_margin_top(s_btnbox, 12);
-    gtk_widget_set_hexpand(s_btnbox, TRUE);
+    /* 收藏按钮 */
+    gtk_box_append(GTK_BOX(btnlist),
+        provider_button(PROVIDERS[OFFICIAL_COUNT], PROVIDER_NAMES[OFFICIAL_COUNT], state));
 
+    /* 分隔线 */
+    GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_margin_top(sep, 8);
+    gtk_widget_set_margin_bottom(sep, 4);
+    gtk_box_append(GTK_BOX(btnlist), sep);
+
+    /* 三方标签 */
+    GtkWidget *lbl_3rd = gtk_label_new("三方图源");
+    gtk_widget_set_halign(lbl_3rd, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(lbl_3rd, 4);
+    gtk_widget_add_css_class(lbl_3rd, "sidebar-label");
+    gtk_box_append(GTK_BOX(btnlist), lbl_3rd);
+
+    /* 三方按钮 */
+    for (int i = OFFICIAL_COUNT + 1; i < PROVIDER_COUNT; i++)
+        gtk_box_append(GTK_BOX(btnlist),
+            provider_button(PROVIDERS[i], PROVIDER_NAMES[i], state));
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), btnlist);
+
+    /* 一言 */
+    state->label_hitokoto = gtk_label_new("加载中…");
+    gtk_widget_set_margin_start(state->label_hitokoto, 12);
+    gtk_widget_set_margin_end(state->label_hitokoto, 12);
+    gtk_label_set_wrap(GTK_LABEL(state->label_hitokoto), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(state->label_hitokoto), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(state->label_hitokoto), 22);
+    gtk_widget_add_css_class(state->label_hitokoto, "sidebar-hitokoto");
+
+    /* 关闭按钮 */
     GtkWidget *btn_close = gtk_button_new_with_label("关闭");
+    gtk_widget_set_margin_start(btn_close, 8);
+    gtk_widget_set_margin_end(btn_close, 8);
+    gtk_widget_set_margin_bottom(btn_close, 4);
     g_signal_connect(btn_close, "clicked", G_CALLBACK(on_sidebar_close), state);
 
-    GtkWidget *btn_apply = gtk_button_new_with_label("应用");
-    gtk_widget_add_css_class(btn_apply, "suggested-action");
-    g_signal_connect(btn_apply, "clicked", G_CALLBACK(on_sidebar_apply), state);
-
-    gtk_box_append(GTK_BOX(s_btnbox), btn_close);
-    gtk_box_append(GTK_BOX(s_btnbox), btn_apply);
-
     gtk_box_append(GTK_BOX(sidebar), s_title);
-    gtk_box_append(GTK_BOX(sidebar), s_lbl1);
-    gtk_box_append(GTK_BOX(sidebar), state->sidebar_dropdown);
-    gtk_box_append(GTK_BOX(sidebar), s_lbl2);
-    gtk_box_append(GTK_BOX(sidebar), radio_seq);
-    gtk_box_append(GTK_BOX(sidebar), radio_rand);
-    gtk_box_append(GTK_BOX(sidebar), s_btnbox);
+    gtk_box_append(GTK_BOX(sidebar), scroll);
+    gtk_box_append(GTK_BOX(sidebar), state->label_hitokoto);
+    gtk_box_append(GTK_BOX(sidebar), btn_close);
 
     /* Revealer：从左滑出 */
     state->sidebar_revealer = gtk_revealer_new();
@@ -861,6 +1104,12 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- CSS ---- */
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css,
+        ".overlay-slogan {"
+        "  font-size: 15px;"
+        "  color: rgba(255,255,255,0.5);"
+        "  text-shadow: 0 1px 3px rgba(0,0,0,0.6);"
+        "  font-style: italic;"
+        "}"
         ".overlay-title {"
         "  font-size: 18px; font-weight: bold;"
         "  color: white;"
@@ -878,6 +1127,14 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         ".sidebar-title {"
         "  font-size: 20px; font-weight: bold;"
         "  color: black;"
+        "}"
+        ".sidebar-hitokoto {"
+        "  font-size: 13px;"
+        "  color: rgba(0,0,0,0.7);"
+        "  font-style: italic;"
+        "  padding: 8px 0;"
+        "  border-top: 1px solid rgba(0,0,0,0.1);"
+        "  border-bottom: 1px solid rgba(0,0,0,0.1);"
         "}"
         ".sidebar-label {"
         "  font-size: 12px; font-weight: bold;"
@@ -912,7 +1169,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     GtkEventController *scroll_ctrl = gtk_event_controller_scroll_new(
         GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
     g_signal_connect(scroll_ctrl, "scroll", G_CALLBACK(on_scroll), state);
-    gtk_widget_add_controller(state->window, scroll_ctrl);
+    gtk_widget_add_controller(state->stack, scroll_ctrl);
 
     /* ---- 左键点击：获取焦点，使键盘生效 ---- */
     GtkEventController *left_click = GTK_EVENT_CONTROLLER(gtk_gesture_click_new());
@@ -928,6 +1185,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- App Actions ---- */
     GSimpleActionGroup *actions = g_simple_action_group_new();
     GSimpleAction *act;
+    act = g_simple_action_new("wallpaper", NULL);
+    g_signal_connect(act, "activate", G_CALLBACK(on_wallpaper_activate), state);
+    g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));
     act = g_simple_action_new("favorite", NULL);
     g_signal_connect(act, "activate", G_CALLBACK(on_favorite_activate), state);
     g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));
@@ -952,10 +1212,15 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     init_queue(state);
 }
 
+/* GResource 注册（由 glib-compile-resources 生成）*/
+extern GResource *icon_get_resource(void);
+
 int main(int argc, char **argv) {
     curl_global_init(CURL_GLOBAL_ALL);
 
-    GtkApplication *app = gtk_application_new("com.example.shiguang",
+    g_resources_register(icon_get_resource());
+
+    GtkApplication *app = gtk_application_new("io.github.populusyang.shiguang",
                                                G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
     int status = g_application_run(G_APPLICATION(app), argc, argv);
