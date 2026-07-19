@@ -1,6 +1,6 @@
 # Maintainer: Populus
 pkgname=shiguang
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="拾光 - 每日一图桌面客户端（第三方 Linux 移植）"
 arch=('x86_64')

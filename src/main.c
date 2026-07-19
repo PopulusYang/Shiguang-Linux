@@ -325,6 +325,23 @@ static void trigger_preload(AppState *state) {
     g_mutex_unlock(&state->mutex);
 }
 
+/* ---- 全屏预览 ---- */
+static void on_fullscreen_activate(GSimpleAction *action, GVariant *param,
+                                    AppState *state) {
+    gboolean is_fs = gtk_window_is_fullscreen(GTK_WINDOW(state->window));
+    if (is_fs) {
+        gtk_window_unfullscreen(GTK_WINDOW(state->window));
+        gtk_widget_set_visible(state->overlay_slogan, TRUE);
+        gtk_widget_set_visible(state->overlay_title, TRUE);
+        gtk_widget_set_visible(state->overlay_info, TRUE);
+    } else {
+        gtk_widget_set_visible(state->overlay_slogan, FALSE);
+        gtk_widget_set_visible(state->overlay_title, FALSE);
+        gtk_widget_set_visible(state->overlay_info, FALSE);
+        gtk_window_fullscreen(GTK_WINDOW(state->window));
+    }
+}
+
 /* ================================================================
  *  键盘 ← → 导航
  * ================================================================ */
@@ -349,6 +366,30 @@ static const char *PROVIDER_NAMES[] = {
 static gboolean on_key_pressed(GtkEventControllerKey *controller,
                                guint keyval, guint keycode,
                                GdkModifierType state, AppState *app) {
+    if (keyval == GDK_KEY_F11) {
+        gboolean is_fs = gtk_window_is_fullscreen(GTK_WINDOW(app->window));
+        if (is_fs) {
+            gtk_window_unfullscreen(GTK_WINDOW(app->window));
+            gtk_widget_set_visible(app->overlay_slogan, TRUE);
+            gtk_widget_set_visible(app->overlay_title, TRUE);
+            gtk_widget_set_visible(app->overlay_info, TRUE);
+        } else {
+            gtk_widget_set_visible(app->overlay_slogan, FALSE);
+            gtk_widget_set_visible(app->overlay_title, FALSE);
+            gtk_widget_set_visible(app->overlay_info, FALSE);
+            gtk_window_fullscreen(GTK_WINDOW(app->window));
+        }
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_Escape) {
+        if (gtk_window_is_fullscreen(GTK_WINDOW(app->window))) {
+            gtk_window_unfullscreen(GTK_WINDOW(app->window));
+            gtk_widget_set_visible(app->overlay_slogan, TRUE);
+            gtk_widget_set_visible(app->overlay_title, TRUE);
+            gtk_widget_set_visible(app->overlay_info, TRUE);
+            return TRUE;
+        }
+    }
     if (keyval == GDK_KEY_Left || keyval == GDK_KEY_h) {
         g_mutex_lock(&app->mutex);
         if (app->cursor > 0) app->cursor--;
@@ -403,7 +444,7 @@ static void on_about_activate(GSimpleAction *action, GVariant *param, AppState *
 
     GtkWidget *about = gtk_about_dialog_new();
     gtk_about_dialog_set_program_name(GTK_ABOUT_DIALOG(about), "拾光");
-    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(about), "0.1.0");
+    gtk_about_dialog_set_version(GTK_ABOUT_DIALOG(about), "0.1.1");
     gtk_about_dialog_set_comments(GTK_ABOUT_DIALOG(about),
         "Linux 第三方桌面客户端\n"
         "非官方版本，仅是对原 Windows UWP 版的移植");
@@ -752,6 +793,7 @@ static void on_quit_activate(GSimpleAction *action, GVariant *param, AppState *s
 static void on_right_click(GtkGestureClick *gesture, int n_press,
                            double x, double y, AppState *state) {
     GMenu *menu = g_menu_new();
+    g_menu_append(menu, "全屏预览",    "app.fullscreen");
     g_menu_append(menu, "设为壁纸",    "app.wallpaper");
     g_menu_append(menu, "收藏",       "app.favorite");
     g_menu_append(menu, "下载原图…",  "app.save");
@@ -803,6 +845,24 @@ static void switch_provider(AppState *state, const char *provider) {
     LoadTask *bwd = g_new0(LoadTask, 1);
     bwd->state = state; bwd->slot = WINDOW_HALF - 1; bwd->side = -1;
     g_thread_new("bwd", load_one, bwd);
+}
+
+/* ---- 图片填充模式切换 ---- */
+static const char *FIT_LABELS[]  = { "适应", "裁剪", "拉伸", "原图" };
+static const GtkContentFit FIT_VALUES[] = {
+    GTK_CONTENT_FIT_CONTAIN,
+    GTK_CONTENT_FIT_COVER,
+    GTK_CONTENT_FIT_FILL,
+    GTK_CONTENT_FIT_SCALE_DOWN,
+};
+static const int FIT_COUNT = G_N_ELEMENTS(FIT_VALUES);
+
+static void on_fit_changed(GtkCheckButton *btn, AppState *state) {
+    if (!gtk_check_button_get_active(btn)) return;
+    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "fit-index"));
+    gtk_picture_set_content_fit(GTK_PICTURE(state->picture_a), FIT_VALUES[idx]);
+    gtk_picture_set_content_fit(GTK_PICTURE(state->picture_b), FIT_VALUES[idx]);
+    g_debug("填充模式: %s", FIT_LABELS[idx]);
 }
 
 /* ---- 点击图源按钮 ---- */
@@ -1105,6 +1165,31 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_label_set_max_width_chars(GTK_LABEL(state->label_hitokoto), 22);
     gtk_widget_add_css_class(state->label_hitokoto, "sidebar-hitokoto");
 
+    /* 图片填充模式（单选按钮，无弹出层）*/
+    GtkWidget *fit_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_margin_start(fit_box, 12);
+    gtk_widget_set_margin_end(fit_box, 12);
+    gtk_widget_set_margin_top(fit_box, 8);
+
+    GtkWidget *fit_label = gtk_label_new("填充模式");
+    gtk_widget_set_halign(fit_label, GTK_ALIGN_START);
+    gtk_widget_add_css_class(fit_label, "sidebar-label");
+    gtk_box_append(GTK_BOX(fit_box), fit_label);
+
+    GtkWidget *fit_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *group = NULL;
+    for (int i = 0; i < FIT_COUNT; i++) {
+        GtkWidget *btn = gtk_check_button_new_with_label(FIT_LABELS[i]);
+        g_object_set_data(G_OBJECT(btn), "fit-index", GINT_TO_POINTER(i));
+        g_signal_connect(btn, "toggled", G_CALLBACK(on_fit_changed), state);
+        gtk_check_button_set_group(GTK_CHECK_BUTTON(btn),
+                                    GTK_CHECK_BUTTON(group));
+        if (i == 0) group = btn;  /* 第一个默认选中 */
+        gtk_box_append(GTK_BOX(fit_btns), btn);
+    }
+    gtk_box_append(GTK_BOX(fit_box), fit_btns);
+    gtk_box_append(GTK_BOX(sidebar), fit_box);
+
     /* 关闭按钮 */
     GtkWidget *btn_close = gtk_button_new_with_label("关闭");
     gtk_widget_set_margin_start(btn_close, 8);
@@ -1213,6 +1298,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- App Actions ---- */
     GSimpleActionGroup *actions = g_simple_action_group_new();
     GSimpleAction *act;
+    act = g_simple_action_new("fullscreen", NULL);
+    g_signal_connect(act, "activate", G_CALLBACK(on_fullscreen_activate), state);
+    g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));
     act = g_simple_action_new("wallpaper", NULL);
     g_signal_connect(act, "activate", G_CALLBACK(on_wallpaper_activate), state);
     g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(act));
