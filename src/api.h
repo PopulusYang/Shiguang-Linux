@@ -1,6 +1,7 @@
 #pragma once
 
-#include <glib.h>
+/* GBytes 前向声明，避免 api.h 引入 glib.h */
+typedef struct _GBytes GBytes;
 
 /**
  * 图片数据

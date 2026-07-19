@@ -1,4 +1,7 @@
+#define G_LOG_DOMAIN "api"
+
 #include "api.h"
+#include <glib.h>
 #include <curl/curl.h>
 #include <json-glib/json-glib.h>
 #include <string.h>
@@ -30,8 +33,13 @@ static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata
 
 /* ---- 发起 GET 请求，返回响应体字符串（失败返回 NULL）---- */
 static char *http_get(const char *url) {
+    g_debug("HTTP GET %s", url);
+
     CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
+    if (!curl) {
+        g_warning("curl_easy_init() 失败");
+        return NULL;
+    }
 
     GString *buf = g_string_new(NULL);
     struct curl_cb_ctx ctx = { buf };
@@ -47,13 +55,25 @@ static char *http_get(const char *url) {
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    double total_time = 0;
+    curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total_time);
+
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_code != 200) {
+    if (res != CURLE_OK) {
+        g_warning("HTTP 请求失败: %s (%.2fs)", curl_easy_strerror(res), total_time);
         g_string_free(buf, TRUE);
         return NULL;
     }
 
+    if (http_code != 200) {
+        g_warning("HTTP %ld (%s) — 期望 200", http_code, url);
+        g_string_free(buf, TRUE);
+        return NULL;
+    }
+
+    g_debug("HTTP 200 — %zu 字节, 耗时 %.2fs", buf->len, total_time);
     return g_string_free(buf, FALSE); /* 返回内部 char*，调用方 g_free */
 }
 
@@ -93,21 +113,30 @@ static ImageData *parse_image_data(JsonReader *reader) {
     img->height = (int)json_reader_get_int_value(reader);
     json_reader_end_member(reader);
 
+    g_debug("解析 data 成功: title=\"%s\", imgurl=\"%s\"",
+            img->title, img->imgurl);
     return img;
 }
 
 /* ---- 核心：请求 API 并解析 ---- */
 static ImageData *api_request(const char *path) {
+    g_debug("API 请求 path=%s", path);
+
     char *url = g_strdup_printf("%s%s", BASE_URL, path);
     char *body = http_get(url);
     g_free(url);
 
-    if (!body) return NULL;
+    if (!body) {
+        g_debug("API 响应为空 -> 返回 NULL");
+        return NULL;
+    }
 
     JsonParser *parser = json_parser_new();
     GError *error = NULL;
 
     if (!json_parser_load_from_data(parser, body, -1, &error)) {
+        g_warning("JSON 解析失败: %s", error->message);
+        g_clear_error(&error);
         g_free(body);
         g_object_unref(parser);
         return NULL;
@@ -119,15 +148,23 @@ static ImageData *api_request(const char *path) {
 
     /* 进入根节点并检查 status */
     if (json_reader_read_member(reader, "status")) {
-        if (json_reader_get_int_value(reader) == 1) {
+        gint64 status = json_reader_get_int_value(reader);
+
+        if (status == 1) {
+            g_debug("API status=1, 进入 data 节点");
             json_reader_end_member(reader);
 
-            /* 进入 data 对象 */
             if (json_reader_read_member(reader, "data")) {
                 img = parse_image_data(reader);
                 json_reader_end_member(reader);
+            } else {
+                g_warning("API 响应缺少 data 字段");
             }
+        } else {
+            g_warning("API status=%ld (非 1)", (long)status);
         }
+    } else {
+        g_warning("API 响应缺少 status 字段");
     }
 
     g_object_unref(reader);
@@ -138,16 +175,22 @@ static ImageData *api_request(const char *path) {
 /* ---- 公开接口 ---- */
 
 ImageData *api_today(const char *provider) {
+    g_debug("api_today(provider=%s)", provider);
     char *path = g_strdup_printf("/%s/today?json=1", provider);
     ImageData *img = api_request(path);
     g_free(path);
+    if (img)
+        g_debug("api_today 成功: %s", img->title);
     return img;
 }
 
 ImageData *api_random(const char *provider) {
+    g_debug("api_random(provider=%s)", provider);
     char *path = g_strdup_printf("/%s/random?json=1", provider);
     ImageData *img = api_request(path);
     g_free(path);
+    if (img)
+        g_debug("api_random 成功: %s", img->title);
     return img;
 }
 
@@ -160,14 +203,29 @@ static size_t curl_binary_write_cb(void *ptr, size_t size, size_t nmemb, void *u
 
 /* ---- 下载图片到 GBytes（二进制安全）---- */
 GBytes *api_download_image(const char *url) {
-    if (!url || !*url) return NULL;
+    if (!url || !*url) {
+        g_debug("api_download_image: URL 为空，跳过");
+        return NULL;
+    }
+
+    g_debug("下载图片: %s", url);
 
     CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
+    if (!curl) {
+        g_warning("curl_easy_init() 失败（图片下载）");
+        return NULL;
+    }
 
     GByteArray *buf = g_byte_array_new();
 
+    /* 伪装浏览器 User-Agent，防止 CDN 返回 403
+     * 注意：不要加 Referer，部分 CDN（dtstatic/duitang）会因跨域拒绝 */
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers,
+        "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36");
+
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_binary_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, buf);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
@@ -178,19 +236,33 @@ GBytes *api_download_image(const char *url) {
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    double total_time = 0;
+    curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total_time);
+
+    curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || http_code != 200) {
+    if (res != CURLE_OK) {
+        g_warning("图片下载失败: %s", curl_easy_strerror(res));
         g_byte_array_unref(buf);
         return NULL;
     }
 
+    if (http_code != 200) {
+        g_warning("图片下载 HTTP %ld", http_code);
+        g_byte_array_unref(buf);
+        return NULL;
+    }
+
+    g_debug("图片下载完成: %u 字节, 耗时 %.2fs", buf->len, total_time);
     return g_byte_array_free_to_bytes(buf);
 }
 
 /* ---- 释放 ---- */
 void api_image_free(ImageData *img) {
     if (!img) return;
+    g_debug("释放 ImageData: title=\"%s\"", img->title);
     g_free(img->title);
     g_free(img->imgurl);
     g_free(img->thumburl);
