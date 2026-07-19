@@ -1,0 +1,50 @@
+#pragma once
+
+#include <glib.h>
+
+/**
+ * 图片数据
+ */
+typedef struct {
+    char *title;       /* 标题 */
+    char *imgurl;      /* 原图链接 */
+    char *thumburl;    /* 缩略图链接 */
+    char *copyright;   /* 版权信息 */
+    char *reldate;     /* 日期 */
+    char *story;       /* 图片故事/描述 */
+    int   width;       /* 宽度 */
+    int   height;      /* 高度 */
+} ImageData;
+
+/**
+ * 图源列表
+ */
+extern const char *PROVIDERS[];
+extern const int   PROVIDER_COUNT;
+
+/**
+ * 获取今日一图
+ * @param provider 图源 ID（如 "timeline", "bing"）
+ * @return ImageData 指针，调用方负责释放（api_image_free）
+ */
+ImageData *api_today(const char *provider);
+
+/**
+ * 获取随机一图
+ * @param provider 图源 ID
+ * @return ImageData 指针，调用方负责释放
+ */
+ImageData *api_random(const char *provider);
+
+/**
+ * 下载图片到内存
+ * @param url  图片 URL
+ * @param len  输出：数据长度
+ * @return 图片字节数据，调用方负责 g_free
+ */
+GBytes *api_download_image(const char *url);
+
+/**
+ * 释放 ImageData
+ */
+void api_image_free(ImageData *img);
