@@ -1,1 +1,28 @@
 build/
+*.o
+*.a
+*.so
+
+# 打包产物
+*.pkg.tar.zst
+pkg/
+src/
+shiguang-*.tar.gz
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Core dump
+core
+
+# macOS
+.DS_Store
