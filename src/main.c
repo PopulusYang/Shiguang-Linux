@@ -43,9 +43,12 @@ typedef struct {
 
 struct AppState {
     GtkWidget   *window;
-    GtkWidget   *picture;
-    GtkWidget   *overlay_title;    /* 标题（overlay） */
-    GtkWidget   *overlay_info;     /* 版权信息（overlay） */
+    GtkWidget   *stack;            /* 双图 crossfade 切换 */
+    GtkWidget   *picture_a;
+    GtkWidget   *picture_b;
+    gboolean     active_is_b;      /* 当前显示的是 picture_b */
+    GtkWidget   *overlay_title;
+    GtkWidget   *overlay_info;
     GtkWidget   *spinner;
     char        *provider;
     ImageOrder   order;            /* 加载顺序 */
@@ -59,7 +62,10 @@ struct AppState {
     int          init_loaded;
     gboolean     startup_done;
 
-    /* 设置对话框不再缓存，每次打开重新创建 */
+    /* 侧边栏控件 */
+    GtkWidget   *sidebar_revealer;
+    GtkWidget   *sidebar_dropdown;
+    GtkWidget   *sidebar_radio_rand;
 };
 
 /* ---- 前向声明 ---- */
@@ -84,12 +90,19 @@ static void display_current(AppState *state) {
     ImageEntry *e = g_ptr_array_index(state->queue, state->cursor);
 
     if (e->ready && e->image) {
-        /* 已就绪：更新图片、文字、隐藏 spinner */
+        /* 新图片设到非活动的 picture 上，然后 crossfade 切换 */
+        GtkWidget *inactive = state->active_is_b
+            ? state->picture_a : state->picture_b;
+        const char *target = state->active_is_b ? "a" : "b";
+
         GdkTexture *tex = gdk_texture_new_from_bytes(e->image, NULL);
         if (tex) {
-            gtk_picture_set_paintable(GTK_PICTURE(state->picture),
+            gtk_picture_set_paintable(GTK_PICTURE(inactive),
                                       GDK_PAINTABLE(tex));
             g_object_unref(tex);
+            gtk_stack_set_visible_child_name(
+                GTK_STACK(state->stack), target);
+            state->active_is_b = !state->active_is_b;
         }
         gtk_widget_set_visible(state->spinner, FALSE);
         gtk_spinner_stop(GTK_SPINNER(state->spinner));
@@ -306,7 +319,8 @@ static gboolean on_scroll(GtkEventControllerScroll *controller,
 /* ---- 左键点击：获取焦点使键盘生效 ---- */
 static void on_left_click(GtkGestureClick *gesture, int n_press,
                           double x, double y, AppState *state) {
-    gtk_widget_grab_focus(state->picture);
+    gtk_widget_grab_focus(state->active_is_b
+        ? state->picture_b : state->picture_a);
 }
 
 /* ================================================================
@@ -336,7 +350,7 @@ static void on_right_click(GtkGestureClick *gesture, int n_press,
     GtkWidget *pop = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
     gtk_popover_set_pointing_to(GTK_POPOVER(pop), &(GdkRectangle){x, y, 1, 1});
     gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
-    gtk_widget_set_parent(pop, state->picture);
+    gtk_widget_set_parent(pop, state->stack);
     gtk_popover_popup(GTK_POPOVER(pop));
     g_object_unref(menu);
 }
@@ -344,28 +358,17 @@ static void on_right_click(GtkGestureClick *gesture, int n_press,
 /* ================================================================
  *  设置对话框
  * ================================================================ */
-/* ---- 设置对话框（每次打开重新创建，关闭即销毁）---- */
-
-typedef struct {
-    AppState   *state;
-    GtkWidget  *window;
-    GtkWidget  *dropdown;
-    GtkWidget  *radio_rand;
-} SettingsCtx;
-
-static void on_settings_destroy(GtkWindow *win, SettingsCtx *ctx) {
-    g_free(ctx);
-}
-
-static void on_settings_apply(GtkButton *btn, SettingsCtx *ctx) {
-    AppState *state = ctx->state;
-    guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(ctx->dropdown));
+/* ---- 侧边栏：应用设置并重新加载 ---- */
+static void on_sidebar_apply(GtkButton *btn, AppState *state) {
+    guint idx = gtk_drop_down_get_selected(
+        GTK_DROP_DOWN(state->sidebar_dropdown));
     if (idx < (guint)PROVIDER_COUNT) {
         g_free(state->provider);
         state->provider = g_strdup(PROVIDERS[idx]);
     }
     state->order = gtk_check_button_get_active(
-        GTK_CHECK_BUTTON(ctx->radio_rand)) ? ORDER_RANDOM : ORDER_SEQUENTIAL;
+        GTK_CHECK_BUTTON(state->sidebar_radio_rand))
+        ? ORDER_RANDOM : ORDER_SEQUENTIAL;
 
     g_debug("设置: provider=%s, order=%s", state->provider,
             state->order == ORDER_RANDOM ? "random" : "sequential");
@@ -396,74 +399,32 @@ static void on_settings_apply(GtkButton *btn, SettingsCtx *ctx) {
     bwd->state = state; bwd->slot = WINDOW_HALF - 1; bwd->side = -1;
     g_thread_new("bwd", load_one, bwd);
 
-    gtk_window_destroy(GTK_WINDOW(ctx->window));
+    /* 收回侧边栏 */
+    gtk_revealer_set_reveal_child(
+        GTK_REVEALER(state->sidebar_revealer), FALSE);
+
 }
 
-static void on_settings_activate(GSimpleAction *action, GVariant *param, AppState *state) {
-    SettingsCtx *ctx = g_new0(SettingsCtx, 1);
-    ctx->state = state;
+/* ---- 侧边栏：关闭 ---- */
+static void on_sidebar_close(GtkButton *btn, AppState *state) {
+    gtk_revealer_set_reveal_child(
+        GTK_REVEALER(state->sidebar_revealer), FALSE);
 
-    GtkWidget *win = gtk_window_new();
-    ctx->window = win;
-    gtk_window_set_title(GTK_WINDOW(win), "设置");
-    gtk_window_set_default_size(GTK_WINDOW(win), 320, 200);
-    gtk_window_set_transient_for(GTK_WINDOW(win), GTK_WINDOW(state->window));
-    gtk_window_set_modal(GTK_WINDOW(win), TRUE);
-    g_signal_connect(win, "destroy", G_CALLBACK(on_settings_destroy), ctx);
+}
 
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_start(vbox, 16);
-    gtk_widget_set_margin_end(vbox, 16);
-    gtk_widget_set_margin_top(vbox, 16);
-    gtk_widget_set_margin_bottom(vbox, 16);
-
-    GtkWidget *lbl1 = gtk_label_new("图源：");
-    gtk_widget_set_halign(lbl1, GTK_ALIGN_START);
-    GtkStringList *providers = gtk_string_list_new((const char * const *)PROVIDERS);
-    GtkWidget *dropdown = gtk_drop_down_new(G_LIST_MODEL(providers), NULL);
-    ctx->dropdown = dropdown;
-
-    /* 默认选中当前 provider */
+/* ---- 右键菜单：弹出侧边栏 ---- */
+static void on_settings_activate(GSimpleAction *action, GVariant *param,
+                                  AppState *state) {
+    /* 同步当前状态到侧边栏控件 */
     for (int i = 0; i < PROVIDER_COUNT; i++) {
         if (g_strcmp0(state->provider, PROVIDERS[i]) == 0) {
-            gtk_drop_down_set_selected(GTK_DROP_DOWN(dropdown), i);
+            gtk_drop_down_set_selected(
+                GTK_DROP_DOWN(state->sidebar_dropdown), i);
             break;
         }
     }
-
-    GtkWidget *lbl2 = gtk_label_new("排序方式：");
-    gtk_widget_set_halign(lbl2, GTK_ALIGN_START);
-    GtkWidget *radio_seq  = gtk_check_button_new_with_label("顺序排列 (今日)");
-    GtkWidget *radio_rand = gtk_check_button_new_with_label("随机排列");
-    ctx->radio_rand = radio_rand;
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(
-        state->order == ORDER_RANDOM ? radio_rand : radio_seq), TRUE);
-    gtk_check_button_set_group(GTK_CHECK_BUTTON(radio_rand),
-                                GTK_CHECK_BUTTON(radio_seq));
-
-    GtkWidget *btn_apply = gtk_button_new_with_label("应用");
-    gtk_widget_add_css_class(btn_apply, "suggested-action");
-    g_signal_connect(btn_apply, "clicked", G_CALLBACK(on_settings_apply), ctx);
-
-    GtkWidget *btn_cancel = gtk_button_new_with_label("取消");
-    g_signal_connect_swapped(btn_cancel, "clicked",
-                             G_CALLBACK(gtk_window_destroy), win);
-
-    GtkWidget *btnbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_halign(btnbox, GTK_ALIGN_END);
-    gtk_widget_set_hexpand(btnbox, TRUE);
-    gtk_box_append(GTK_BOX(btnbox), btn_cancel);
-    gtk_box_append(GTK_BOX(btnbox), btn_apply);
-
-    gtk_box_append(GTK_BOX(vbox), lbl1);
-    gtk_box_append(GTK_BOX(vbox), dropdown);
-    gtk_box_append(GTK_BOX(vbox), lbl2);
-    gtk_box_append(GTK_BOX(vbox), radio_seq);
-    gtk_box_append(GTK_BOX(vbox), radio_rand);
-    gtk_box_append(GTK_BOX(vbox), btnbox);
-
-    gtk_window_set_child(GTK_WINDOW(win), vbox);
-    gtk_window_present(GTK_WINDOW(win));
+    gtk_revealer_set_reveal_child(
+        GTK_REVEALER(state->sidebar_revealer), TRUE);
 }
 
 /* ================================================================
@@ -508,13 +469,23 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_window_set_title(GTK_WINDOW(state->window), "拾光");
     gtk_window_set_default_size(GTK_WINDOW(state->window), 1024, 768);
 
-    /* ---- 图片(铺满) ---- */
-    state->picture = gtk_picture_new();
-    gtk_widget_set_halign(state->picture, GTK_ALIGN_FILL);
-    gtk_widget_set_valign(state->picture, GTK_ALIGN_FILL);
-    gtk_widget_set_hexpand(state->picture, TRUE);
-    gtk_widget_set_vexpand(state->picture, TRUE);
-    gtk_picture_set_content_fit(GTK_PICTURE(state->picture), GTK_CONTENT_FIT_CONTAIN);
+    /* ---- 双图 Stack（crossfade 过渡）---- */
+    state->picture_a = gtk_picture_new();
+    gtk_picture_set_content_fit(GTK_PICTURE(state->picture_a), GTK_CONTENT_FIT_CONTAIN);
+
+    state->picture_b = gtk_picture_new();
+    gtk_picture_set_content_fit(GTK_PICTURE(state->picture_b), GTK_CONTENT_FIT_CONTAIN);
+
+    state->stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(state->stack),
+                                   GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+    gtk_stack_set_transition_duration(GTK_STACK(state->stack), 400);
+    gtk_stack_add_named(GTK_STACK(state->stack), state->picture_a, "a");
+    gtk_stack_add_named(GTK_STACK(state->stack), state->picture_b, "b");
+    gtk_stack_set_visible_child_name(GTK_STACK(state->stack), "a");
+    state->active_is_b = FALSE;
+    gtk_widget_set_hexpand(state->stack, TRUE);
+    gtk_widget_set_vexpand(state->stack, TRUE);
 
     /* ---- 文字 overlay ---- */
     state->overlay_title = gtk_label_new(NULL);
@@ -542,13 +513,82 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_valign(state->spinner, GTK_ALIGN_CENTER);
     gtk_spinner_start(GTK_SPINNER(state->spinner));
 
-    /* ---- Overlay 叠层: 底=图片, 上=文字信息+spinner ---- */
-    GtkWidget *overlay = gtk_overlay_new();
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), state->picture);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), info_box);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), state->spinner);
+    /* 图片区 Overlay: 底=图片, 上=文字+spinner */
+    GtkWidget *pic_overlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(pic_overlay), state->stack);
+    gtk_overlay_add_overlay(GTK_OVERLAY(pic_overlay), info_box);
+    gtk_overlay_add_overlay(GTK_OVERLAY(pic_overlay), state->spinner);
 
-    gtk_window_set_child(GTK_WINDOW(state->window), overlay);
+    /* ---- 左侧侧边栏 ---- */
+    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_size_request(sidebar, 260, -1);
+    gtk_widget_set_valign(sidebar, GTK_ALIGN_FILL);
+    gtk_widget_set_margin_start(sidebar, 16);
+    gtk_widget_set_margin_end(sidebar, 16);
+    gtk_widget_set_margin_top(sidebar, 24);
+    gtk_widget_set_margin_bottom(sidebar, 24);
+    gtk_widget_add_css_class(sidebar, "sidebar");
+
+    GtkWidget *s_title = gtk_label_new("设置");
+    gtk_widget_set_halign(s_title, GTK_ALIGN_START);
+    gtk_widget_add_css_class(s_title, "sidebar-title");
+
+    GtkWidget *s_lbl1 = gtk_label_new("图源");
+    gtk_widget_set_halign(s_lbl1, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(s_lbl1, 8);
+    gtk_widget_add_css_class(s_lbl1, "sidebar-label");
+
+    GtkStringList *providers = gtk_string_list_new((const char * const *)PROVIDERS);
+    state->sidebar_dropdown = gtk_drop_down_new(G_LIST_MODEL(providers), NULL);
+
+    GtkWidget *s_lbl2 = gtk_label_new("排序方式");
+    gtk_widget_set_halign(s_lbl2, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(s_lbl2, 8);
+    gtk_widget_add_css_class(s_lbl2, "sidebar-label");
+
+    GtkWidget *radio_seq  = gtk_check_button_new_with_label("顺序排列");
+    GtkWidget *radio_rand = gtk_check_button_new_with_label("随机排列");
+    state->sidebar_radio_rand = radio_rand;
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(radio_seq), TRUE);
+    gtk_check_button_set_group(GTK_CHECK_BUTTON(radio_rand),
+                                GTK_CHECK_BUTTON(radio_seq));
+
+    GtkWidget *s_btnbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(s_btnbox, GTK_ALIGN_END);
+    gtk_widget_set_margin_top(s_btnbox, 12);
+    gtk_widget_set_hexpand(s_btnbox, TRUE);
+
+    GtkWidget *btn_close = gtk_button_new_with_label("关闭");
+    g_signal_connect(btn_close, "clicked", G_CALLBACK(on_sidebar_close), state);
+
+    GtkWidget *btn_apply = gtk_button_new_with_label("应用");
+    gtk_widget_add_css_class(btn_apply, "suggested-action");
+    g_signal_connect(btn_apply, "clicked", G_CALLBACK(on_sidebar_apply), state);
+
+    gtk_box_append(GTK_BOX(s_btnbox), btn_close);
+    gtk_box_append(GTK_BOX(s_btnbox), btn_apply);
+
+    gtk_box_append(GTK_BOX(sidebar), s_title);
+    gtk_box_append(GTK_BOX(sidebar), s_lbl1);
+    gtk_box_append(GTK_BOX(sidebar), state->sidebar_dropdown);
+    gtk_box_append(GTK_BOX(sidebar), s_lbl2);
+    gtk_box_append(GTK_BOX(sidebar), radio_seq);
+    gtk_box_append(GTK_BOX(sidebar), radio_rand);
+    gtk_box_append(GTK_BOX(sidebar), s_btnbox);
+
+    /* Revealer：从左滑出 */
+    state->sidebar_revealer = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(state->sidebar_revealer),
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(state->sidebar_revealer), 250);
+    gtk_revealer_set_child(GTK_REVEALER(state->sidebar_revealer), sidebar);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(state->sidebar_revealer), FALSE);
+
+    /* ---- 水平布局: [侧边栏] [图片区] ---- */
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_append(GTK_BOX(hbox), state->sidebar_revealer);
+    gtk_box_append(GTK_BOX(hbox), pic_overlay);
+    gtk_window_set_child(GTK_WINDOW(state->window), hbox);
 
     /* ---- CSS ---- */
     GtkCssProvider *css = gtk_css_provider_new();
@@ -562,6 +602,32 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         "  font-size: 13px;"
         "  color: rgba(255,255,255,0.85);"
         "  text-shadow: 0 1px 3px rgba(0,0,0,0.7);"
+        "}"
+        ".sidebar {"
+        "  background-color: rgba(255,255,255,0.85);"
+        "  border-right: 1px solid rgba(0,0,0,0.1);"
+        "}"
+        ".sidebar-title {"
+        "  font-size: 20px; font-weight: bold;"
+        "  color: black;"
+        "}"
+        ".sidebar-label {"
+        "  font-size: 12px; font-weight: bold;"
+        "  color: rgba(0,0,0,0.55);"
+        "  text-transform: uppercase; letter-spacing: 1px;"
+        "}"
+        ".sidebar checkbutton {"
+        "  color: black;"
+        "}"
+        ".sidebar checkbutton check {"
+        "  background-color: rgba(0,0,0,0.08);"
+        "  border-color: rgba(0,0,0,0.3);"
+        "}"
+        ".sidebar dropdown > button {"
+        "  color: black;"
+        "}"
+        ".sidebar button {"
+        "  color: black;"
         "}");
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(),
@@ -583,7 +649,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* ---- 左键点击：获取焦点，使键盘生效 ---- */
     GtkEventController *left_click = GTK_EVENT_CONTROLLER(gtk_gesture_click_new());
     g_signal_connect(left_click, "pressed", G_CALLBACK(on_left_click), state);
-    gtk_widget_add_controller(state->picture, left_click);
+    gtk_widget_add_controller(state->stack, left_click);
 
     /* ---- 右键手势 ---- */
     GtkEventController *right_click = GTK_EVENT_CONTROLLER(gtk_gesture_click_new());
